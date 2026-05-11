@@ -1,0 +1,470 @@
+================================================================================
+  HƯỚNG DẪN ĐẦY ĐỦ: THU ẢNH → TRAIN → DEPLOY
+  SDR Spectrum Analyzer v6 — UAV Signal Detection
+================================================================================
+
+MỤC LỤC
+────────
+  PHẦN 1: LỰA CHỌN MÔ HÌNH AI PHÙ HỢP
+  PHẦN 2: THU ẢNH WATERFALL (TẠO DATASET)
+  PHẦN 3: CHUẨN BỊ & TỔ CHỨC DATASET
+  PHẦN 4: TRAINING MODEL (GPU)
+  PHẦN 5: DEPLOY MÔ HÌNH VÀO HỆ THỐNG
+  PHẦN 6: ĐÁNH GIÁ & ĐIỀU CHỈNH
+
+
+================================================================================
+PHẦN 1: LỰA CHỌN MÔ HÌNH AI PHÙ HỢP
+================================================================================
+
+VẤN ĐỀ CỤ THỂ:
+  - Input : Ảnh waterfall 640×640 px, màu cầu vồng
+  - Trục X: tần số (100 MHz span)
+  - Trục Y: thời gian (~21 giây tại 30 FPS)
+  - Mục tiêu: phân biệt UAV (DJI, Skydio...) vs nhiễu nền
+
+ĐẶC ĐIỂM TÍN HIỆU UAV TRÊN WATERFALL:
+  ┌─────────────────────────────────────────────────────────┐
+  │ FHSS (Frequency Hopping): xuất hiện ngắt quãng, nhiều  │
+  │   dải tần, pattern đặc trưng của từng hãng             │
+  │ OFDM (DJI Lightbridge/OcuSync): băng thông 10-20 MHz,  │
+  │   liên tục, chiếm cố định một dải tần                  │
+  │ 2.4 GHz + 5.8 GHz: thường dùng đồng thời              │
+  └─────────────────────────────────────────────────────────┘
+
+KHUYẾN NGHỊ MÔ HÌNH:
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ STAGE 1: PHÁT HIỆN (Detection)                                          │
+  │                                                                         │
+  │ ▶ YOLOv11n (KHUYẾN NGHỊ NHẤT)                                          │
+  │   + Mới nhất (2024), nhỏ nhất, nhanh nhất                              │
+  │   + ~2.6M params, ~3ms/inference GPU                                   │
+  │   + Bounding box → biết chính xác tín hiệu UAV ở đâu trong waterfall   │
+  │   Cài: pip install ultralytics                                          │
+  │                                                                         │
+  │   YOLOv8s (thay thế nếu cần)                                           │
+  │   + ~11M params, chính xác hơn v11n một chút                           │
+  │   + ~5ms/inference GPU                                                  │
+  │                                                                         │
+  │ STAGE 2: PHÂN LOẠI CHỦNG LOẠI (Classification)                         │
+  │                                                                         │
+  │ ▶ EfficientNetV2-S (KHUYẾN NGHỊ NHẤT)                                  │
+  │   + ~21M params, ~8ms/inference CPU                                    │
+  │   + Chính xác cao, pretrained ImageNet → transfer learning tốt          │
+  │   + Deploy được trên CPU (không cần GPU khi inference)                 │
+  │   Cài: pip install timm                                                 │
+  │                                                                         │
+  │   Swin Transformer-T (thay thế nếu dataset lớn >10K ảnh)               │
+  │   + Self-attention nắm pattern tần số-thời gian tốt hơn CNN             │
+  │   + ~28M params, cần nhiều data hơn để train hiệu quả                  │
+  │   + Chính xác tốt hơn EfficientNet khi có đủ data                      │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+TẠI SAO KHÔNG DÙNG ResNet THUẦN:
+  ResNet-50 kém hơn EfficientNetV2-S ~3% accuracy với cùng kích thước
+  EfficientNetV2-S nhanh hơn 30% và chính xác hơn
+
+TẠI SAO KHÔNG DÙNG ViT NGAY:
+  ViT cần >50K ảnh để train tốt. Dataset ban đầu thường <5K ảnh.
+  EfficientNetV2-S hiệu quả hơn với dataset nhỏ nhờ inductive bias CNN.
+
+
+================================================================================
+PHẦN 2: THU ẢNH WATERFALL (TẠO DATASET)
+================================================================================
+
+2.1 CẤU HÌNH TRƯỚC KHI THU
+───────────────────────────
+Trên giao diện phần mềm:
+
+  a) Ref Level: -20 dBm (phù hợp với UAV ở tầm 100-500m)
+     → Nếu tín hiệu quá yếu: chọn -30 hoặc -40 dBm
+
+  b) Dynamic Range: 80 dB (nền navy đến đỉnh đỏ = 80 dB)
+
+  c) Scale to Ref: BẬT (thang màu tự động theo ref/dyn_range)
+     → Đảm bảo tất cả ảnh cùng thang màu → model học nhất quán
+
+  d) Các kênh tần số: thêm tần số bay của UAV bạn cần nhận diện
+     Thông dụng: 2400 MHz ±50 MHz (2.4 GHz), 5800 MHz ±50 MHz (5.8 GHz)
+     DJI OcuSync 3: cũng hoạt động ở 900 MHz
+
+  e) Hold time: 1-2 giây mỗi kênh
+
+2.2 THU ẢNH THỦ CÔNG 📷 (cho dataset có nhãn chính xác)
+─────────────────────────────────────────────────────────
+  - Nhấn nút 📷 trên slot khi UAV đang hoạt động
+  - Ảnh được lưu vào captures/ với kết quả AI tự động
+  - Sau đó gán nhãn thủ công qua API:
+
+    curl -X PUT "http://localhost:8000/api/captures/1/label?label=DJI_Mini_2"
+
+  - Hoặc gán hàng loạt bằng script:
+
+    python << 'PY'
+    import requests
+    rows = requests.get("http://localhost:8000/api/captures").json()
+    for c in rows["captures"]:
+        requests.put(f"http://localhost:8000/api/captures/{c['id']}/label",
+                     params={"label": "uav", "notes": "DJI Mini 2, 100m"})
+    PY
+
+2.3 THU ẢNH TỰ ĐỘNG 🔴 (cho dataset số lượng lớn)
+───────────────────────────────────────────────────
+  - Nhấn nút 🔴 trên slot → dialog cấu hình
+  - Nhập thư mục lưu, ví dụ:
+      D:\dataset\uav\DJI_Mini2\    (khi có UAV đang bay)
+      D:\dataset\no_uav\noise\     (khi không có UAV)
+
+  - Nhấn "▶ Bắt đầu thu" → ảnh tự động lưu sau mỗi lần chuyển kênh
+  - Thanh đỏ "● THU TỰ ĐỘNG" hiện số ảnh đã thu
+
+  QUAN TRỌNG: Tổ chức ảnh theo folder ngay từ đầu:
+    dataset_raw/
+    ├── uav/
+    │   ├── DJI_Mini2/      ← thu khi DJI Mini 2 đang bay
+    │   ├── DJI_Phantom4/   ← thu khi DJI Phantom 4 đang bay
+    │   └── controller/     ← thu khi tay cầm đang kết nối
+    └── no_uav/
+        ├── background/     ← môi trường sạch không có UAV
+        └── interference/   ← nhiễu WiFi, Bluetooth (negative hard samples)
+
+2.4 SỐ LƯỢNG ẢNH CẦN THIẾT
+────────────────────────────
+  Tối thiểu (classify hoạt động):
+    500 ảnh/lớp × 2 lớp = 1000 ảnh
+
+  Tốt (kết quả ổn định):
+    2000 ảnh/lớp × số lớp
+
+  Lý tưởng (chính xác cao):
+    5000+ ảnh/lớp × số lớp
+
+  Với 2 kênh × hold 1s × 30 FPS = 30 ảnh/phút/kênh
+  Chạy 30 phút = ~900 ảnh/kênh
+
+2.5 ĐIỀU KIỆN THU ĐA DẠNG
+───────────────────────────
+  Thu trong nhiều điều kiện để model không overfit:
+    ✓ Khoảng cách khác nhau: 50m, 100m, 200m, 500m
+    ✓ Hướng bay khác nhau: bay thẳng, hover, maneuver
+    ✓ Nhiều UAV cùng lúc (nếu có thể)
+    ✓ Nhiễu nền khác nhau: WiFi, Bluetooth, radar khí tượng
+    ✓ Thời điểm khác nhau: sáng/chiều (nhiệt độ ảnh hưởng noise floor)
+    ✓ Chế độ video, ảnh, hover, sport mode của UAV
+
+
+================================================================================
+PHẦN 3: CHUẨN BỊ DATASET
+================================================================================
+
+3.1 CÀI ĐẶT MÔI TRƯỜNG
+────────────────────────
+  Tạo môi trường riêng:
+    python -m venv venv_train
+    venv_train\Scripts\activate          (Windows)
+    source venv_train/bin/activate       (Linux/Mac)
+
+  Cài PyTorch với CUDA:
+    # Kiểm tra phiên bản CUDA: nvidia-smi
+    pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+
+  Cài dependencies training:
+    pip install -r training/requirements_training.txt
+
+3.2 TỔ CHỨC DATASET
+─────────────────────
+  Chạy script step1:
+
+    cd training/
+    python step1_prepare_dataset.py \
+      --src  ../backend/captures \
+      --dst  dataset \
+      --split 0.70 0.15 0.15
+
+  Kết quả:
+    dataset/
+    ├── train/uav/     : 70% ảnh UAV
+    ├── train/no_uav/  : 70% ảnh không UAV
+    ├── val/uav/       : 15%
+    ├── val/no_uav/    : 15%
+    ├── test/uav/      : 15%
+    └── test/no_uav/   : 15%
+
+  Nếu ảnh ở nhiều folder riêng:
+    python step1_prepare_dataset.py \
+      --src  D:\dataset_raw \
+      --dst  dataset \
+      --split 0.70 0.15 0.15
+
+3.3 KIỂM TRA DATASET
+──────────────────────
+  Xem phân phối ảnh:
+    python -c "
+    from pathlib import Path
+    for split in ['train','val','test']:
+        for cls in Path('dataset').glob(f'{split}/*'):
+            n = len(list(cls.glob('*.png')))
+            print(f'{split}/{cls.name}: {n} ảnh')
+    "
+
+  Xem mẫu ảnh (nếu có matplotlib):
+    python -c "
+    import matplotlib.pyplot as plt
+    from pathlib import Path
+    from PIL import Image
+    imgs = list(Path('dataset/train/uav').glob('*.png'))[:4]
+    fig,axes = plt.subplots(1,4,figsize=(16,4))
+    for ax,p in zip(axes,imgs):
+        ax.imshow(Image.open(p)); ax.set_title(p.name[:20]); ax.axis('off')
+    plt.tight_layout(); plt.savefig('sample.png'); print('→ sample.png')
+    "
+
+
+================================================================================
+PHẦN 4: TRAINING MODEL
+================================================================================
+
+4.1 KIỂM TRA GPU TRƯỚC KHI TRAIN
+───────────────────────────────────
+  python -c "
+  import torch
+  print('CUDA available:', torch.cuda.is_available())
+  if torch.cuda.is_available():
+      print('GPU:', torch.cuda.get_device_name(0))
+      mem = torch.cuda.get_device_properties(0).total_memory/1e9
+      print(f'VRAM: {mem:.1f} GB')
+  "
+
+  Nếu có GPU → tốc độ train nhanh hơn CPU khoảng 10-50x
+  RTX 3060 (12GB): ~5 giây/epoch với 2000 ảnh, batch=16
+
+4.2 TRAIN CLASSIFIER (EfficientNetV2-S)
+─────────────────────────────────────────
+  # Phân loại nhị phân: uav / no_uav
+  python step2_train.py \
+    --mode    classify \
+    --data    dataset \
+    --epochs  50 \
+    --batch   32 \
+    --out     models_output
+
+  # Phân loại đa lớp: DJI_Mini2 / DJI_Phantom4 / no_uav / ...
+  # (cần thêm folder con cho mỗi loại trong dataset/)
+  python step2_train.py \
+    --mode    classify \
+    --data    dataset_multiclass \
+    --epochs  100 \
+    --batch   16 \
+    --out     models_output_multiclass
+
+  GHI CHÚ BATCH SIZE:
+    GPU 4GB VRAM  : batch=8
+    GPU 8GB VRAM  : batch=16
+    GPU 12GB VRAM : batch=32
+    GPU 24GB VRAM : batch=64
+
+4.3 TRAIN YOLO (phát hiện bounding box)
+─────────────────────────────────────────
+  Cần annotation YOLO format (.txt) trước:
+    Mỗi file .txt cùng tên với ảnh .png:
+    Nội dung: <class_id> <x_center> <y_center> <width> <height>
+    (tất cả normalized 0.0-1.0)
+
+    Ví dụ file label: 20240101_uav.txt
+    0 0.35 0.42 0.28 0.15    ← class 0 (uav_signal), bbox
+
+  Tool annotation khuyến nghị:
+    - Label Studio (web): https://labelstud.io
+    - Roboflow (online): https://roboflow.com
+    - CVAT (self-hosted): https://cvat.ai
+
+  Sau khi có annotation:
+  python step2_train.py \
+    --mode    yolo \
+    --data    yolo_dataset \
+    --epochs  100 \
+    --batch   16 \
+    --out     yolo_output
+
+4.4 GIÁM SÁT TRAINING
+───────────────────────
+  TensorBoard (nếu cài):
+    pip install tensorboard
+    tensorboard --logdir models_output/runs
+
+  Theo dõi terminal: in ra mỗi epoch:
+    Epoch [ 1/50] train=52.3%/0.6831  val=61.2%/0.5921  (8.3s)
+    Epoch [ 2/50] train=67.8%/0.5102  val=74.5%/0.4412  (7.9s)
+         ✓ Best model saved (val_acc=74.50%)
+    ...
+
+  Model tốt khi:
+    val_acc > 90% cho bài toán uav/no_uav
+    val_acc > 80% cho bài toán phân loại nhiều chủng loại
+
+4.5 ĐÁNH GIÁ MODEL
+────────────────────
+  Sau training, xem confusion matrix:
+    start models_output/confusion_matrix.png    (Windows)
+    open  models_output/confusion_matrix.png    (Mac/Linux)
+
+  Xem training curves:
+    start models_output/training_curves.png
+
+  Classification report in ra:
+              precision  recall  f1-score  support
+    no_uav       0.95    0.93     0.94      150
+    uav          0.92    0.94     0.93      142
+    accuracy                      0.93      292
+
+
+================================================================================
+PHẦN 5: DEPLOY MÔ HÌNH
+================================================================================
+
+5.1 DEPLOY TỰ ĐỘNG (khuyến nghị)
+───────────────────────────────────
+  # Deploy classifier ONNX
+  python step3_deploy.py \
+    --model   models_output/classifier.onnx \
+    --labels  models_output/class_labels.json \
+    --type    classify \
+    --backend ../backend \
+    --api-url http://localhost:8000
+
+  # Deploy YOLO ONNX
+  python step3_deploy.py \
+    --model   yolo_output/yolo_uav/weights/best.onnx \
+    --type    yolo \
+    --backend ../backend
+
+5.2 DEPLOY THỦ CÔNG
+────────────────────
+  Bước 1: Copy file weight vào backend/ai/models/
+    copy models_output\classifier.onnx ..\backend\ai\models\
+
+  Bước 2: Sửa backend/ai/config.yaml
+    classification:
+      engine:   onnx
+      weight:   classifier.onnx    ← tên file trong models/
+      img_size: 224
+      classes:
+        - no_uav
+        - uav                       ← đúng thứ tự lúc train
+      device: cpu
+
+  Bước 3: Reload model (không cần restart server)
+    curl -X POST http://localhost:8000/api/ai/reload
+
+  Bước 4: Kiểm tra trạng thái
+    curl http://localhost:8000/api/ai/status
+    → {"detection": "mock", "classification": "ready", ...}
+
+5.3 KIỂM TRA SAU DEPLOY
+─────────────────────────
+  Trên giao diện:
+    1. Mở http://localhost:5173
+    2. Mục "AI nhận diện UAV" → thấy "● Phân loại: ready"
+    3. Bật quét, bay UAV → nhấn 📷
+    4. Badge kết quả AI hiện bên dưới slot:
+       "⚠ PHÁT HIỆN UAV  87.3%  DJI_Mini_2 (73.1%)"
+
+  Chạy thử qua API:
+    python -c "
+    import requests, base64
+    from pathlib import Path
+
+    # Đọc ảnh test
+    img = Path('../backend/captures').glob('*.png')
+    img = next(img, None)
+    if not img:
+        print('Không có ảnh trong captures/')
+    else:
+        # Kiểm tra AI status
+        r = requests.get('http://localhost:8000/api/ai/status')
+        print(r.json())
+    "
+
+
+================================================================================
+PHẦN 6: ĐÁNH GIÁ & ĐIỀU CHỈNH
+================================================================================
+
+6.1 KHI MODEL KHÔNG CHÍNH XÁC
+───────────────────────────────
+  Accuracy thấp (<80%):
+    → Thu thêm ảnh (ít nhất 2000/lớp)
+    → Kiểm tra dataset cân bằng (equal samples per class)
+    → Tăng epochs lên 100-200
+
+  Overfitting (train_acc >> val_acc):
+    → Thu thêm ảnh đa dạng hơn
+    → Tăng dropout: sửa model.drop_rate trong step2_train.py
+    → Thêm augmentation mạnh hơn
+
+  Underfitting (cả train và val thấp):
+    → Tăng số epochs
+    → Giảm learning rate: lr=5e-5 thay vì 1e-4
+    → Dùng model lớn hơn: efficientnetv2_m
+
+6.2 FINE-TUNING KHI CÓ THÊM DATA
+────────────────────────────────────
+  # Tiếp tục train từ model đã có
+  python -c "
+  import torch, timm, json
+  from pathlib import Path
+
+  # Load model cũ
+  with open('models_output/class_labels.json') as f:
+      info = json.load(f)
+  classes = info['classes']
+  model = timm.create_model('efficientnetv2_s', num_classes=len(classes))
+  model.load_state_dict(torch.load('models_output/best_classifier.pt'))
+
+  # Tiếp tục train với data mới
+  # ... (tương tự step2_train.py nhưng load từ checkpoint)
+  "
+
+6.3 THÊM LOẠI UAV MỚI
+───────────────────────
+  1. Thu ảnh loại UAV mới vào folder riêng
+  2. Chạy lại step1 để tái tổ chức dataset
+  3. Chạy lại step2 với --epochs 100 (train from scratch hoặc từ checkpoint)
+  4. Deploy model mới
+
+6.4 METRICS TỐT CẦN ĐẠT
+─────────────────────────
+  Binary (uav / no_uav):
+    precision > 0.92    ← ít false alarm
+    recall    > 0.90    ← ít bỏ sót UAV thật
+    f1-score  > 0.91
+
+  Multi-class (nhiều loại UAV):
+    macro f1-score > 0.85
+
+
+================================================================================
+  TÓM TẮT WORKFLOW NHANH
+================================================================================
+
+  # 1. Thu ảnh (chạy phần mềm, bật 🔴 auto-capture)
+  #    Tổ chức theo folder: dataset_raw/uav/, dataset_raw/no_uav/
+
+  # 2. Chuẩn bị dataset
+  cd training/
+  python step1_prepare_dataset.py --src ../backend/captures --dst dataset
+
+  # 3. Train (cần GPU)
+  python step2_train.py --mode classify --data dataset --epochs 50 --batch 32
+
+  # 4. Deploy
+  python step3_deploy.py --model models_output/classifier.onnx \
+    --labels models_output/class_labels.json --backend ../backend
+
+  # 5. Reload và dùng ngay
+  curl -X POST http://localhost:8000/api/ai/reload
+
+================================================================================
+  Câu hỏi: xem README_AI.txt để biết chi tiết về config.yaml
+================================================================================

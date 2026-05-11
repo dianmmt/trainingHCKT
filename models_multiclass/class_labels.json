@@ -1,0 +1,16 @@
+{
+  "classes": [
+    "ELRS",
+    "Futaba",
+    "datalink_900MHz",
+    "dji_mavic3_10M",
+    "dji_mavic3_20M",
+    "dji_mavic3_40M",
+    "dji_mavic3_telemetry",
+    "no_uav"
+  ],
+  "num_classes": 8,
+  "best_val_acc": 100.0,
+  "mode": "multiclass",
+  "img_size": 224
+}

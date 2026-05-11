@@ -1,0 +1,35 @@
+# ─── Training environment requirements ───────────────────────────────────────
+# Cài đặt:
+#   pip install -r requirements_training.txt
+#
+# PyTorch với CUDA (chọn đúng phiên bản CUDA của bạn):
+#   CUDA 12.1:  pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+#   CUDA 11.8:  pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+#   CPU only:   pip install torch torchvision
+#
+# Kiểm tra CUDA:
+#   python -c "import torch; print(torch.cuda.is_available())"
+
+# Core ML
+timm>=0.9.12              # EfficientNetV2-S, Swin Transformer, ConvNeXt
+ultralytics>=8.2.0        # YOLOv8, YOLOv11
+
+# ONNX export & inference
+onnxruntime-gpu>=1.18.0   # GPU inference (dùng onnxruntime nếu không có GPU)
+# onnxruntime>=1.18.0     # CPU only
+onnx>=1.16.0
+onnxsim>=0.4.36           # simplify ONNX graph
+
+# Data & augmentation
+numpy>=1.26.0
+Pillow>=10.3.0
+albumentations>=1.4.0     # augmentation nâng cao cho spectrogram
+
+# Visualization & metrics
+matplotlib>=3.8.0
+seaborn>=0.13.0
+scikit-learn>=1.4.0       # classification_report, confusion_matrix
+
+# Utils
+pyyaml>=6.0.1
+tqdm>=4.66.0

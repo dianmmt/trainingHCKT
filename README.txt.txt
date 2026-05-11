@@ -1,0 +1,1 @@
+folder training cho ảnh thu từ SM200C

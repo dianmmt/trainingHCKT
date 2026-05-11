@@ -1,0 +1,7 @@
+{
+  "classes": [
+    "no_uav",
+    "uav"
+  ],
+  "num_classes": 2
+}
